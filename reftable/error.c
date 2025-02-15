@@ -27,8 +27,6 @@ const char *reftable_error_str(int err)
 		return "misuse of the reftable API";
 	case REFTABLE_ZLIB_ERROR:
 		return "zlib failure";
-	case REFTABLE_NAME_CONFLICT:
-		return "file/directory conflict";
 	case REFTABLE_EMPTY_TABLE_ERROR:
 		return "wrote empty table";
 	case REFTABLE_REFNAME_ERROR:
@@ -37,6 +35,8 @@ const char *reftable_error_str(int err)
 		return "entry too large";
 	case REFTABLE_OUTDATED_ERROR:
 		return "data concurrently modified";
+	case REFTABLE_OUT_OF_MEMORY_ERROR:
+		return "out of memory";
 	case -1:
 		return "general error";
 	default:

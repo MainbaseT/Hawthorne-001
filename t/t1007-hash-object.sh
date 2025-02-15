@@ -2,7 +2,6 @@
 
 test_description="git hash-object"
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 echo_without_newline() {
@@ -258,6 +257,12 @@ test_expect_success '--literally with extra-long type' '
 	t=12345678901234567890123456789012345678901234567890 &&
 	t="$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t$t" &&
 	echo example | git hash-object -t $t --literally --stdin
+'
+
+test_expect_success '--stdin outside of repository (uses SHA-1)' '
+	nongit git hash-object --stdin <hello >actual &&
+	echo "$(test_oid --hash=sha1 hello)" >expect &&
+	test_cmp expect actual
 '
 
 test_done

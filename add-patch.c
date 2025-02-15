@@ -1,3 +1,6 @@
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "add-interactive.h"
 #include "advice.h"
@@ -5,9 +8,11 @@
 #include "environment.h"
 #include "gettext.h"
 #include "object-name.h"
+#include "pager.h"
 #include "read-cache-ll.h"
 #include "repository.h"
 #include "strbuf.h"
+#include "sigchain.h"
 #include "run-command.h"
 #include "strvec.h"
 #include "pathspec.h"
@@ -293,13 +298,13 @@ static void err(struct add_p_state *s, const char *fmt, ...)
 	va_list args;
 
 	va_start(args, fmt);
-	fputs(s->s.error_color, stderr);
-	vfprintf(stderr, fmt, args);
-	fputs(s->s.reset_color, stderr);
-	fputc('\n', stderr);
+	fputs(s->s.error_color, stdout);
+	vprintf(fmt, args);
+	puts(s->s.reset_color);
 	va_end(args);
 }
 
+LAST_ARG_MUST_BE_NULL
 static void setup_child_process(struct add_p_state *s,
 				struct child_process *cp, ...)
 {
@@ -400,6 +405,12 @@ static void complete_file(char marker, struct hunk *hunk)
 		hunk->splittable_into++;
 }
 
+/* Empty context lines may omit the leading ' ' */
+static int normalize_marker(const char *p)
+{
+	return p[0] == '\n' || (p[0] == '\r' && p[1] == '\n') ? ' ' : p[0];
+}
+
 static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 {
 	struct strvec args = STRVEC_INIT;
@@ -421,7 +432,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 			    /* could be on an unborn branch */
 			    !strcmp("HEAD", s->revision) &&
 			    repo_get_oid(the_repository, "HEAD", &oid) ?
-			    empty_tree_oid_hex() : s->revision);
+			    empty_tree_oid_hex(the_repository->hash_algo) : s->revision);
 	}
 	color_arg_index = args.nr;
 	/* Use `--no-color` explicitly, just in case `diff.color = always`. */
@@ -485,6 +496,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 	while (p != pend) {
 		char *eol = memchr(p, '\n', pend - p);
 		const char *deleted = NULL, *mode_change = NULL;
+		char ch = normalize_marker(p);
 
 		if (!eol)
 			eol = pend;
@@ -532,7 +544,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 			 * Start counting into how many hunks this one can be
 			 * split
 			 */
-			marker = *p;
+			marker = ch;
 		} else if (hunk == &file_diff->head &&
 			   starts_with(p, "new file")) {
 			file_diff->added = 1;
@@ -586,10 +598,10 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 			    (int)(eol - (plain->buf + file_diff->head.start)),
 			    plain->buf + file_diff->head.start);
 
-		if ((marker == '-' || marker == '+') && *p == ' ')
+		if ((marker == '-' || marker == '+') && ch == ' ')
 			hunk->splittable_into++;
-		if (marker && *p != '\\')
-			marker = *p;
+		if (marker && ch != '\\')
+			marker = ch;
 
 		p = eol == pend ? pend : eol + 1;
 		hunk->end = p - plain->buf;
@@ -813,7 +825,7 @@ static int merge_hunks(struct add_p_state *s, struct file_diff *file_diff,
 					    (int)(hunk->end - hunk->start),
 					    plain + hunk->start);
 
-				if (plain[overlap_end] != ' ')
+				if (normalize_marker(&plain[overlap_end]) != ' ')
 					return error(_("expected context line "
 						       "#%d in\n%.*s"),
 						     (int)(j + 1),
@@ -953,7 +965,7 @@ static int split_hunk(struct add_p_state *s, struct file_diff *file_diff,
 	context_line_count = 0;
 
 	while (splittable_into > 1) {
-		ch = s->plain.buf[current];
+		ch = normalize_marker(&s->plain.buf[current]);
 
 		if (!ch)
 			BUG("buffer overrun while splitting hunks");
@@ -1131,7 +1143,8 @@ static int edit_hunk_manually(struct add_p_state *s, struct hunk *hunk)
 				"removed, then the edit is\n"
 				"aborted and the hunk is left unchanged.\n"));
 
-	if (strbuf_edit_interactively(&s->buf, "addp-hunk-edit.diff", NULL) < 0)
+	if (strbuf_edit_interactively(the_repository, &s->buf,
+				      "addp-hunk-edit.diff", NULL) < 0)
 		return -1;
 
 	/* strip out commented lines */
@@ -1171,14 +1184,14 @@ static ssize_t recount_edited_hunk(struct add_p_state *s, struct hunk *hunk,
 
 	header->old_count = header->new_count = 0;
 	for (i = hunk->start; i < hunk->end; ) {
-		switch (s->plain.buf[i]) {
+		switch(normalize_marker(&s->plain.buf[i])) {
 		case '-':
 			header->old_count++;
 			break;
 		case '+':
 			header->new_count++;
 			break;
-		case ' ': case '\r': case '\n':
+		case ' ':
 			header->old_count++;
 			header->new_count++;
 			break;
@@ -1228,6 +1241,7 @@ static int prompt_yesno(struct add_p_state *s, const char *prompt)
 		fflush(stdout);
 		if (read_single_character(s) == EOF)
 			return -1;
+		/* do not limit to 1-byte input to allow 'no' etc. */
 		switch (tolower(s->answer.buf[0])) {
 		case 'n': return 0;
 		case 'y': return 1;
@@ -1326,7 +1340,7 @@ static int apply_for_checkout(struct add_p_state *s, struct strbuf *diff,
 		err(s, _("Nothing was applied.\n"));
 	} else
 		/* As a last resort, show the diff to the user */
-		fwrite(diff->buf, diff->len, 1, stderr);
+		fwrite(diff->buf, diff->len, 1, stdout);
 
 	return 0;
 }
@@ -1388,7 +1402,7 @@ N_("j - leave this hunk undecided, see next undecided hunk\n"
    "/ - search for a hunk matching the given regex\n"
    "s - split the current hunk into smaller hunks\n"
    "e - manually edit the current hunk\n"
-   "p - print the current hunk\n"
+   "p - print the current hunk, 'P' to use the pager\n"
    "? - print help\n");
 
 static int patch_update_file(struct add_p_state *s,
@@ -1399,7 +1413,7 @@ static int patch_update_file(struct add_p_state *s,
 	struct hunk *hunk;
 	char ch;
 	struct child_process cp = CHILD_PROCESS_INIT;
-	int colored = !!s->colored.len, quit = 0;
+	int colored = !!s->colored.len, quit = 0, use_pager = 0;
 	enum prompt_mode_type prompt_mode_type;
 	enum {
 		ALLOW_GOTO_PREVIOUS_HUNK = 1 << 0,
@@ -1449,9 +1463,18 @@ static int patch_update_file(struct add_p_state *s,
 		strbuf_reset(&s->buf);
 		if (file_diff->hunk_nr) {
 			if (rendered_hunk_index != hunk_index) {
+				if (use_pager) {
+					setup_pager(the_repository);
+					sigchain_push(SIGPIPE, SIG_IGN);
+				}
 				render_hunk(s, hunk, 0, colored, &s->buf);
 				fputs(s->buf.buf, stdout);
 				rendered_hunk_index = hunk_index;
+				if (use_pager) {
+					sigchain_pop(SIGPIPE);
+					wait_for_pager();
+					use_pager = 0;
+				}
 			}
 
 			strbuf_reset(&s->buf);
@@ -1511,6 +1534,12 @@ static int patch_update_file(struct add_p_state *s,
 		if (!s->answer.len)
 			continue;
 		ch = tolower(s->answer.buf[0]);
+
+		/* 'g' takes a hunk number and '/' takes a regexp */
+		if (s->answer.len != 1 && (ch != 'g' && ch != '/')) {
+			err(s, _("Only one letter is expected, got '%s'"), s->answer.buf);
+			continue;
+		}
 		if (ch == 'y') {
 			hunk->use = USE_HUNK;
 soft_increment:
@@ -1646,6 +1675,7 @@ soft_increment:
 				err(s, _("No hunk matches the given pattern"));
 				break;
 			}
+			regfree(&regex);
 			hunk_index = i;
 		} else if (s->answer.buf[0] == 's') {
 			size_t splittable_into = hunk->splittable_into;
@@ -1665,9 +1695,10 @@ soft_increment:
 				hunk->use = USE_HUNK;
 				goto soft_increment;
 			}
-		} else if (s->answer.buf[0] == 'p') {
+		} else if (ch == 'p') {
 			rendered_hunk_index = -1;
-		} else {
+			use_pager = (s->answer.buf[0] == 'P') ? 1 : 0;
+		} else if (s->answer.buf[0] == '?') {
 			const char *p = _(help_patch_remainder), *eol = p;
 
 			color_fprintf(stdout, s->s.help_color, "%s",
@@ -1691,6 +1722,9 @@ soft_increment:
 				color_fprintf_ln(stdout, s->s.help_color,
 						 "%.*s", (int)(eol - p), p);
 			}
+		} else {
+			err(s, _("Unknown command '%s' (use '?' for help)"),
+			    s->answer.buf);
 		}
 	}
 
@@ -1777,9 +1811,9 @@ int run_add_p(struct repository *r, enum add_p_mode mode,
 			break;
 
 	if (s.file_diff_nr == 0)
-		fprintf(stderr, _("No changes.\n"));
+		err(&s, _("No changes."));
 	else if (binary_count == s.file_diff_nr)
-		fprintf(stderr, _("Only binary files changed.\n"));
+		err(&s, _("Only binary files changed."));
 
 	add_p_state_clear(&s);
 	return 0;

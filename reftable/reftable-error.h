@@ -30,6 +30,7 @@ enum reftable_error {
 
 	/* Misuse of the API:
 	 *  - on writing a record with NULL refname.
+	 *  - on writing a record before setting the writer limits.
 	 *  - on writing a reftable_ref_record outside the table limits
 	 *  - on writing a ref or log record before the stack's
 	 * next_update_inde*x
@@ -48,9 +49,6 @@ enum reftable_error {
 	/* Wrote a table without blocks. */
 	REFTABLE_EMPTY_TABLE_ERROR = -8,
 
-	/* Dir/file conflict. */
-	REFTABLE_NAME_CONFLICT = -9,
-
 	/* Invalid ref name. */
 	REFTABLE_REFNAME_ERROR = -10,
 
@@ -60,6 +58,9 @@ enum reftable_error {
 
 	/* Trying to write out-of-date data. */
 	REFTABLE_OUTDATED_ERROR = -12,
+
+	/* An allocation has failed due to an out-of-memory situation. */
+	REFTABLE_OUT_OF_MEMORY_ERROR = -13,
 };
 
 /* convert the numeric error code to a string. The string should not be
